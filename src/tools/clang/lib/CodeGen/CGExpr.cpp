@@ -1397,16 +1397,18 @@ void CodeGenFunction::EmitAliasCall(LOCN_TYPE loc) {
     auto &predicateMap = CGM.getPredicateMap();
 
     if (!predicateMap.count(loc))
-      return;
+        return;
 
-    for (auto it = predicateMap[loc].begin(); it != predicateMap[loc].end();
-         it++) {
-      auto ValueFn = llvm::Intrinsic::getDeclaration(
-          &CGM.getModule(), llvm::Intrinsic::unseq_noalias);
-#define FILENAME CGM.getModule().getName().str()
+    for (auto it = predicateMap[loc].begin(); it != predicateMap[loc].end(); it++) {
+      // Don't emit calls for predicates conditional to functions being readonly
+      if (it->size() > 2)
+        continue;
 
       LValue lval1 = CGM.getExprLValueMap()[(*it)[0]];
       LValue lval2 = CGM.getExprLValueMap()[(*it)[1]];
+      
+      #define FILENAME CGM.getModule().getName().str()
+      // LLVM addresses bit-fields belonging to one integer in the same way
       if (lval1.isBitField() && lval2.isBitField()) {
         llvm::errs() << "An alias predicate in " << FILENAME
                      << "is between bit-fields\n";
@@ -1428,26 +1430,13 @@ void CodeGenFunction::EmitAliasCall(LOCN_TYPE loc) {
 
       ValueArgs.push_back(uniqueIdValue);
       ValueArgs.push_back(wrapValueinMD(val1, CGM));
-      ValueArgs.push_back(wrapValueinMD(val2, CGM));
+      ValueArgs.push_back(wrapValueinMD(val2, CGM)); 
 
-      // Add the possibly interfering function calls
-      bool indirect = false;
-      for (int i = 2; i < it->size(); i++) {
-        llvm::Value *val = getRValueVal(CGM.getCallRValueMap()[(*it)[i]]);
-        if (!val || !isa<llvm::CallInst>(val)) {
-          llvm::errs() << "An RValue in " << FILENAME << " is not a Call\n";
-          indirect = true;
-          break;
-        }
-
-        val = cast<llvm::CallInst>(val)->getCalledValue()->stripPointerCasts();
-        ValueArgs.push_back(wrapValueinMD(val, CGM));
-      }
-
-      if (indirect) { // ignore predicdates with indirect call
-        continue;
-      }
-      EmitNounwindRuntimeCall(ValueFn, ValueArgs);
+      // Code to compute diff of 2 pointers and check if it is zero
+      llvm::Value *int_val_1 = Builder.CreatePtrToInt(val1, llvm::IntegerType::get(CGM.getLLVMContext(), 64));
+      llvm::Value *int_val_2 = Builder.CreatePtrToInt(val2, llvm::IntegerType::get(CGM.getLLVMContext(), 64));
+      llvm::Value *is_eq = Builder.CreateICmpNE(int_val_1, int_val_2);
+      EmitTrapCheck(is_eq);
     }
 
     // Clear the maps on sequnece point
@@ -3287,7 +3276,7 @@ void CodeGenFunction::EmitTrapCheck(llvm::Value *Checked) {
     llvm::CallInst *TrapCall = EmitTrapCall(llvm::Intrinsic::trap);
     TrapCall->setDoesNotReturn();
     TrapCall->setDoesNotThrow();
-    Builder.CreateUnreachable();
+    // Builder.CreateUnreachable();
   } else {
     Builder.CreateCondBr(Checked, Cont, TrapBB);
   }
